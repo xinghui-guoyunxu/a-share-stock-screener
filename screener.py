@@ -156,3 +156,8 @@ def main():
     if result:
         print(pd.DataFrame(result)[["code", "name", "signal_date", "signal_gain",
               "signal_low",
+ "after_low", "latest_close", "safe_space", "float_cap"]].head(20).to_string())
+
+
+if __name__ == "__main__":
+    main()
