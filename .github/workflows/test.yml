@@ -1,0 +1,17 @@
+name: 接口测试
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 安装依赖
+        run: pip install akshare pandas
+      - name: 运行接口测试
+        run: python test_data.py
