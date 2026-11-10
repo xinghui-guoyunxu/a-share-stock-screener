@@ -8,11 +8,14 @@ import akshare as ak
 import pandas as pd
 
 # ============ 参数 ============
-MIN_CAP = 50e8      # 流通市值下限(元)
-MAX_CAP = 300e8     # 流通市值上限(元)
-LOOKBACK = 10       # 最近10个交易日
-MIN_GAIN = 0.05     # 涨幅>=5%
-WORKERS = 4         # 并发数
+MIN_CAP = 50e8       # 流通市值下限(元)
+MAX_CAP = 300e8      # 流通市值上限(元)
+MIN_GAIN = 0.05      # 信号日涨幅>=5%
+DAYS_MIN = 5         # 信号日在往前第5个交易日
+DAYS_MAX = 7         # 至往前第7个交易日
+MAX_ABOVE = 0.03     # 现价不超过阳线高点的3%
+TREND_MODE = "bull"  # "bull"=5>10>20日线; "ma10"=收盘价>10日线
+WORKERS = 4
 # ==============================
 
 
@@ -29,7 +32,7 @@ def retry(func, times=3, wait=3):
 
 def fetch_kline(code):
     today = datetime.date.today()
-    start = (today - datetime.timedelta(days=30)).strftime("%Y%m%d")
+    start = (today - datetime.timedelta(days=100)).strftime("%Y%m%d")
     end = today.strftime("%Y%m%d")
     try:
         df = retry(lambda: ak.stock_zh_a_hist(
@@ -38,17 +41,23 @@ def fetch_kline(code):
         df = df.rename(columns={"日期": "date", "开盘": "open", "收盘": "close",
                                 "最高": "high", "最低": "low"})
     except Exception:
-        # 备用源：腾讯
-        if code.startswith("6"):
-            prefix = "sh"
-        elif code.startswith(("4", "8", "9")):
-            raise
-        else:
-            prefix = "sz"
+        prefix = "sh" if code.startswith("6") else "sz"
         df = retry(lambda: ak.stock_zh_a_hist_tx(
             symbol=prefix + code, start_date=start,
             end_date=end, adjust="qfq"), times=2, wait=2)
     return df[["date", "open", "close", "high", "low"]]
+
+
+def trend_ok(df):
+    c = df["close"]
+    ma5 = c.rolling(5).mean().iloc[-1]
+    ma10 = c.rolling(10).mean().iloc[-1]
+    ma20 = c.rolling(20).mean().iloc[-1]
+    if pd.isna(ma20):
+        return False
+    if TREND_MODE == "ma10":
+        return c.iloc[-1] > ma10
+    return ma5 > ma10 > ma20
 
 
 def analyze(df):
@@ -58,31 +67,43 @@ def analyze(df):
     for c in ["open", "close", "high", "low"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna().sort_values("date").reset_index(drop=True)
-    if len(df) < LOOKBACK + 1:
+    if len(df) < 25:
         return None, None
     last = len(df) - 1
     last_date = df.loc[last, "date"]
     latest_close = float(df.loc[last, "close"])
+    if not trend_ok(df):
+        return last_date, None
 
-    # 从最近一天往前找，第一个有效信号即"最近有效信号日"
-    for i in range(last, last - LOOKBACK, -1):
+    # 按交易日: 往前第5~7个交易日, 取距今最近的有效信号
+    for d in range(DAYS_MIN, DAYS_MAX + 1):
+        i = last - d
+        if i < 1:
+            break
         prev_close = float(df.loc[i - 1, "close"])
         close_i = float(df.loc[i, "close"])
         open_i = float(df.loc[i, "open"])
         gain = close_i / prev_close - 1
-        if gain >= MIN_GAIN and close_i > open_i:
-            sig_low = float(df.loc[i, "low"])
-            after = df.loc[i + 1:, "low"]
-            after_min = float(after.min()) if len(after) else None
-            if after_min is None or after_min >= sig_low - 1e-9:
-                return last_date, {
-                    "signal_date": df.loc[i, "date"],
-                    "signal_gain": round(gain * 100, 2),
-                    "signal_low": round(sig_low, 2),
-                    "after_low": None if after_min is None else round(after_min, 2),
-                    "latest_close": round(latest_close, 2),
-                    "safe_space": round((latest_close - sig_low) / latest_close * 100, 2),
-                }
+        if gain < MIN_GAIN or close_i <= open_i:
+            continue
+        sig_low = float(df.loc[i, "low"])
+        sig_high = float(df.loc[i, "high"])
+        after_min = float(df.loc[i + 1:, "low"].min())
+        if after_min < sig_low - 1e-9:
+            continue
+        if latest_close > sig_high * (1 + MAX_ABOVE):
+            continue
+        return last_date, {
+            "signal_date": df.loc[i, "date"],
+            "days_ago": d,
+            "signal_gain": round(gain * 100, 2),
+            "signal_low": round(sig_low, 2),
+            "signal_high": round(sig_high, 2),
+            "after_low": round(after_min, 2),
+            "latest_close": round(latest_close, 2),
+            "above_high": round((latest_close / sig_high - 1) * 100, 2),
+            "safe_space": round((latest_close - sig_low) / latest_close * 100, 2),
+        }
     return last_date, None
 
 
@@ -90,16 +111,15 @@ def main():
     t0 = time.time()
     print("1) 获取全市场行情与流通市值 ...")
     spot = retry(lambda: ak.stock_zh_a_spot_em(), times=3, wait=10)
-    print("行情列名:", list(spot.columns))
-    if "流通市值" not in spot.columns:
-        raise SystemExit("找不到[流通市值]列，请把上面的列名发给我")
     spot["流通市值"] = pd.to_numeric(spot["流通市值"], errors="coerce")
-    print("流通市值抽样(单位应为元):")
-    print(spot[["代码", "名称", "流通市值"]].head(5).to_string())
+    spot["代码"] = spot["代码"].astype(str).str.zfill(6)
 
+    # 剔除科创板(688)、北交所(4/8/9开头)
+    mask_ex = spot["代码"].str.startswith(("688", "4", "8", "9"))
+    spot = spot[~mask_ex]
     pool = spot[(spot["流通市值"] >= MIN_CAP) & (spot["流通市值"] <= MAX_CAP)]
-    print(f"全市场 {len(spot)} 只, 市值50~300亿共 {len(pool)} 只")
-    stocks = [(str(r["代码"]).zfill(6), r["名称"], float(r["流通市值"]))
+    print(f"剔除科创板/北交所后 {len(spot)} 只, 市值50~300亿共 {len(pool)} 只")
+    stocks = [(r["代码"], r["名称"], float(r["流通市值"]))
               for _, r in pool.iterrows()]
 
     print("2) 逐只拉取日K并筛选 ...")
@@ -133,9 +153,8 @@ def main():
                 print(f"进度 {done}/{len(stocks)}, 已用时 {int(time.time()-t0)} 秒")
 
     cutoff = max(last_dates) if last_dates else None
-    # 剔除停牌股(最后交易日早于截止日)
     result = [r for r in rows if r.pop("_last") == cutoff]
-    result.sort(key=lambda r: (r["signal_date"], r["safe_space"]), reverse=True)
+    result.sort(key=lambda r: r["safe_space"], reverse=True)
 
     out = {
         "updated_at": (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime("%Y-%m-%d %H:%M"),
@@ -153,10 +172,11 @@ def main():
 
     print("\n" + "#" * 60)
     print(f"截止日 {cutoff} | 市值池 {len(pool)} | 失败 {len(failed)} | 入选 {len(result)} | 总耗时 {int(time.time()-t0)} 秒")
+    cols = ["code", "name", "signal_date", "days_ago", "signal_gain",
+            "signal_low", "signal_high", "after_low", "latest_close",
+            "above_high", "safe_space", "float_cap"]
     if result:
-        print(pd.DataFrame(result)[["code", "name", "signal_date", "signal_gain",
-              "signal_low",
- "after_low", "latest_close", "safe_space", "float_cap"]].head(20).to_string())
+        print(pd.DataFrame(result)[cols].head(30).to_string())
 
 
 if __name__ == "__main__":
