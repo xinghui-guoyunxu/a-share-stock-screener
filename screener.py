@@ -89,8 +89,8 @@ def analyze(df):
             and ma60.iloc[last] > ma60.iloc[last - 10]
             and ma20.iloc[last] > ma60.iloc[last]):
         return last_date, None
-    low60 = c.iloc[-60:].min()
-    high60 = c.iloc[-60:].max()
+    low60 = float(c.iloc[-60:].min())
+    high60 = float(c.iloc[-60:].max())
     if latest_close < low60 * (1 + FROM_LOW_MIN):
         return last_date, None
     if latest_close > high60 * NEAR_HIGH_MAX:
@@ -122,7 +122,7 @@ def analyze(df):
         gain20 = latest_close / float(c.iloc[last - 20]) - 1
         if GAIN20_MIN <= gain20 <= GAIN20_MAX:
             hits.append("20日涨幅达标")
-        dist = latest_close / ma20.iloc[last] - 1
+        dist = latest_close / float(ma20.iloc[last]) - 1
         if 0 <= dist <= DIST_MA20_MAX:
             hits.append("近MA20")
         if df.loc[last, "close"] > df.loc[last, "open"] and \
@@ -138,24 +138,23 @@ def analyze(df):
                 touch = "MA20"
             if touch is None or df.loc[j, "close"] < ma20.iloc[j] * 0.99:
                 continue
-            pull_date, pull_to = df.loc[j, "date"], touch
+            pull_date, pull_to = str(df.loc[j, "date"]), touch
             vm = vol_ma5.iloc[j]
-            shrink = (not pd.isna(vm)) and vm > 0 and \
-                df.loc[j, "volume"] <= vm * VOL_RATIO
+            shrink = bool((not pd.isna(vm)) and vm > 0 and
+                          df.loc[j, "volume"] <= vm * VOL_RATIO)
             break
         if pull_date:
             hits.append("回踩" + pull_to)
         if shrink:
             hits.append("回踩缩量")
 
-        score = len(hits) - (1 if pull_date and shrink else 0) \
-            if False else sum([
-                "多头排列" in hits, "20日涨幅达标" in hits, "近MA20" in hits,
-                "重新收阳" in hits, bool(pull_date), shrink])
+        score = int(sum([
+            "多头排列" in hits, "20日涨幅达标" in hits, "近MA20" in hits,
+            "重新收阳" in hits, bool(pull_date), shrink]))
 
         return last_date, {
-            "signal_date": df.loc[i, "date"],
-            "days_ago": d,
+            "signal_date": str(df.loc[i, "date"]),
+            "days_ago": int(d),
             "signal_gain": round(gain * 100, 2),
             "signal_low": round(sig_low, 2),
             "signal_high": round(sig_high, 2),
@@ -165,6 +164,8 @@ def analyze(df):
             "safe_space": round((latest_close - sig_low) / latest_close * 100, 2),
             "gain20": round(gain20 * 100, 2),
             "dist_ma20": round(dist * 100, 2),
+            "from_low60": round((latest_close / low60 - 1) * 100, 2),
+            "to_high60": round((latest_close / high60 - 1) * 100, 2),
             "pullback_date": pull_date,
             "score": score,
             "hit": "、".join(hits),
@@ -235,7 +236,7 @@ def main():
     }
     os.makedirs("docs", exist_ok=True)
     with open("docs/data.json", "w", encoding="utf-8") as fp:
-        json.dump(out, fp, ensure_ascii=False, indent=1)
+        json.dump(out, fp, ensure_ascii=False, indent=1, default=float)
 
     # 导出文件: csv + txt + 通达信blk(全部/精选)
     if result:
@@ -246,7 +247,8 @@ def main():
             "signal_high": "信号日最高价", "after_low": "后续最低价",
             "latest_close": "最新收盘价", "above_high": "现价高于阳线高点%",
             "safe_space": "安全空间%", "gain20": "20日涨幅%",
-            "dist_ma20": "距MA20%", "pullback_date": "回踩日",
+            "dist_ma20": "距MA20%", "from_low60": "距60日低点%",
+            "to_high60": "距60日高点%", "pullback_date": "回踩日",
             "float_cap": "流通市值(亿)"})
         first = ["代码", "名称", "得分", "命中条件"]
         df_out = df_out[first + [c for c in df_out.columns if c not in first]]
