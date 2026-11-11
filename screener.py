@@ -8,18 +8,21 @@ import akshare as ak
 import pandas as pd
 
 # ============ 参数 ============
-MIN_CAP = 50e8        # 流通市值下限(元)
-MAX_CAP = 300e8       # 流通市值上限(元)
-MIN_GAIN = 0.05       # 信号日涨幅>=5%
-DAYS_MIN = 5          # 信号日在往前第5个交易日
-DAYS_MAX = 7          # 至往前第7个交易日
-MAX_ABOVE = 0.03      # 现价不超过阳线高点3%
-GAIN20_MAX = 0.18     # 20日涨幅上限(打分项)
-DIST_MA20_MAX = 0.08  # 距MA20上限(打分项)
-PULL_DAYS = 3         # 回踩窗口(最近N个交易日,不含今天)
-TOUCH_TOL = 0.01      # 回踩容差
-VOL_RATIO = 0.8       # 回踩日缩量比例
-TOP_SCORE = 5         # 精选得分门槛
+MIN_CAP = 50e8         # 流通市值下限(元)
+MAX_CAP = 300e8        # 流通市值上限(元)
+MIN_GAIN = 0.05        # 信号日涨幅>=5%
+DAYS_MIN = 5           # 信号日在往前第5个交易日
+DAYS_MAX = 7           # 至往前第7个交易日
+MAX_ABOVE = 0.03       # 现价不超过阳线高点3%
+FROM_LOW_MIN = 0.15    # 现价至少高于近60日最低收盘价15%
+NEAR_HIGH_MAX = 0.98   # 现价不超过近60日最高收盘价的98%
+GAIN20_MIN = 0.08      # 20日涨幅下限(打分项)
+GAIN20_MAX = 0.25      # 20日涨幅上限(打分项)
+DIST_MA20_MAX = 0.08   # 距MA20上限(打分项)
+PULL_DAYS = 3          # 回踩窗口(最近N个交易日,不含今天)
+TOUCH_TOL = 0.01       # 回踩容差
+VOL_RATIO = 0.8        # 回踩日缩量比例
+TOP_SCORE = 5          # 精选得分门槛
 WORKERS = 4
 # ==============================
 
@@ -62,7 +65,7 @@ def analyze(df):
     for c in ["open", "close", "high", "low", "volume"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna().sort_values("date").reset_index(drop=True)
-    if len(df) < 30:
+    if len(df) < 65:
         return None, None
     last = len(df) - 1
     last_date = df.loc[last, "date"]
@@ -72,15 +75,28 @@ def analyze(df):
     ma5 = c.rolling(5).mean()
     ma10 = c.rolling(10).mean()
     ma20 = c.rolling(20).mean()
-    vol_ma5 = df["volume"].rolling(5).shift(1) if False else df["volume"].rolling(5).mean().shift(1)
+    ma60 = c.rolling(60).mean()
+    vol_ma5 = df["volume"].rolling(5).mean().shift(1)
 
-    # 硬性: 最新收盘>=MA20, MA20今天高于5天前
+    # ---- 硬性: 上涨趋势(中期) ----
+    if pd.isna(ma60.iloc[last]) or pd.isna(ma60.iloc[last - 10]):
+        return last_date, None
     if latest_close < ma20.iloc[last]:
         return last_date, None
     if not ma20.iloc[last] > ma20.iloc[last - 5]:
         return last_date, None
+    if not (latest_close > ma60.iloc[last]
+            and ma60.iloc[last] > ma60.iloc[last - 10]
+            and ma20.iloc[last] > ma60.iloc[last]):
+        return last_date, None
+    low60 = c.iloc[-60:].min()
+    high60 = c.iloc[-60:].max()
+    if latest_close < low60 * (1 + FROM_LOW_MIN):
+        return last_date, None
+    if latest_close > high60 * NEAR_HIGH_MAX:
+        return last_date, None
 
-    # 硬性: 信号日(往前第5~7个交易日, 取距今最近的有效信号)
+    # ---- 硬性: 信号日(往前第5~7个交易日, 取距今最近的有效信号) ----
     for d in range(DAYS_MIN, DAYS_MAX + 1):
         i = last - d
         if i < 1:
@@ -104,7 +120,7 @@ def analyze(df):
         if ma5.iloc[last] > ma10.iloc[last] > ma20.iloc[last]:
             hits.append("多头排列")
         gain20 = latest_close / float(c.iloc[last - 20]) - 1
-        if gain20 <= GAIN20_MAX:
+        if GAIN20_MIN <= gain20 <= GAIN20_MAX:
             hits.append("20日涨幅达标")
         dist = latest_close / ma20.iloc[last] - 1
         if 0 <= dist <= DIST_MA20_MAX:
@@ -124,16 +140,18 @@ def analyze(df):
                 continue
             pull_date, pull_to = df.loc[j, "date"], touch
             vm = vol_ma5.iloc[j]
-            shrink = (not pd.isna(vm)) and vm > 0 and df.loc[j, "volume"] <= vm * VOL_RATIO
+            shrink = (not pd.isna(vm)) and vm > 0 and \
+                df.loc[j, "volume"] <= vm * VOL_RATIO
             break
         if pull_date:
             hits.append("回踩" + pull_to)
         if shrink:
             hits.append("回踩缩量")
 
-        score = sum(1 for h in hits if h in
-                    ("多头排列", "20日涨幅达标", "近MA20", "重新收阳")) \
-            + (1 if pull_date else 0) + (1 if shrink else 0)
+        score = len(hits) - (1 if pull_date and shrink else 0) \
+            if False else sum([
+                "多头排列" in hits, "20日涨幅达标" in hits, "近MA20" in hits,
+                "重新收阳" in hits, bool(pull_date), shrink])
 
         return last_date, {
             "signal_date": df.loc[i, "date"],
