@@ -19,6 +19,12 @@ MAX_ABOVE = 0.03       # 现价不超过阳线高点3%
 FROM_LOW_MIN = 0.15    # 现价至少高于近60日最低收盘价15%
 NEAR_HIGH_MAX = 0.98   # 现价不超过近60日最高收盘价的98%
 GAIN60_MIN = 0.20      # 60日涨幅下限
+GAIN60_MAX = 0.60      # 60日涨幅上限(排除翻倍股)
+GAIN20_HARD = 0.35     # 20日涨幅硬上限
+DIST_MA60_MAX = 0.30   # 现价高于MA60不超过30%
+LIMIT_UP_MAIN = 0.095  # 主板涨停判定
+LIMIT_UP_GEM = 0.19    # 创业板涨停判定
+LIMIT_UP_MAX = 1       # 近20日涨停次数上限
 MA60_SLOPE_MIN = 0.03  # MA60比20日前至少高3%
 MA_GAP_MIN = 0.02      # MA20至少高于MA60的2%
 TREND_STRICT = True    # True=含高低点抬高+均线拉开; False=宽松
@@ -76,7 +82,7 @@ def higher_structure(df, last):
             and segs[0][1] < segs[1][1] < segs[2][1])
 
 
-def analyze(df):
+def analyze(df, code):
     """返回 (最后交易日, 有效信号或None)"""
     df = df.copy()
     df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
@@ -108,9 +114,21 @@ def analyze(df):
         return last_date, None
     if ma60.iloc[last] < ma60.iloc[last - 20] * (1 + MA60_SLOPE_MIN):
         return last_date, None
+
+    # ---- 硬性: 涨幅区间 + 防过热 ----
     gain60 = latest_close / float(c.iloc[last - 60]) - 1
-    if gain60 < GAIN60_MIN:
+    if gain60 < GAIN60_MIN or gain60 > GAIN60_MAX:
         return last_date, None
+    gain20 = latest_close / float(c.iloc[last - 20]) - 1
+    if gain20 > GAIN20_HARD:
+        return last_date, None
+    if latest_close > float(ma60.iloc[last]) * (1 + DIST_MA60_MAX):
+        return last_date, None
+    limit_th = LIMIT_UP_GEM if code.startswith(("300", "301")) else LIMIT_UP_MAIN
+    daily = c.pct_change()
+    if int((daily.iloc[-20:] >= limit_th).sum()) > LIMIT_UP_MAX:
+        return last_date, None
+
     low60 = float(c.iloc[-60:].min())
     high60 = float(c.iloc[-60:].max())
     if latest_close < low60 * (1 + FROM_LOW_MIN):
@@ -146,7 +164,6 @@ def analyze(df):
         hits = []
         if ma5.iloc[last] > ma10.iloc[last] > ma20.iloc[last]:
             hits.append("多头排列")
-        gain20 = latest_close / float(c.iloc[last - 20]) - 1
         if GAIN20_MIN <= gain20 <= GAIN20_MAX:
             hits.append("20日涨幅达标")
         dist = latest_close / float(ma20.iloc[last]) - 1
@@ -223,7 +240,7 @@ def main():
     def work(item):
         code, name, cap = item
         df = fetch_kline(code)
-        last_date, sig = analyze(df)
+        last_date, sig = analyze(df, code)
         return code, name, cap, last_date, sig
 
     done = 0
