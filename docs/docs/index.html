@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A股选股</title>
+<style>
+  :root{--bg:#f5f6f8;--card:#fff;--text:#222;--sub:#666;--line:#eee;--head:#fafafa}
+  @media (prefers-color-scheme: dark){
+    :root{--bg:#121316;--card:#1b1d22;--text:#e6e6e6;--sub:#9aa0a6;--line:#2a2d33;--head:#22252b}
+  }
+  body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;margin:0;padding:12px;background:var(--bg);color:var(--text)}
+  h1{font-size:18px;margin:4px 0}
+  .meta{font-size:12px;color:var(--sub);margin-bottom:8px;line-height:1.7}
+  .bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:center}
+  .bar input,.bar select{padding:6px 8px;border:1px solid var(--line);border-radius:6px;font-size:14px;background:var(--card);color:var(--text)}
+  .bar a{font-size:13px;color:#1a73e8;text-decoration:none}
+  .wrap{overflow:auto;max-height:78vh;background:var(--card);border-radius:8px}
+  table{border-collapse:collapse;width:100%;font-size:13px;white-space:nowrap}
+  th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:right}
+  th{background:var(--head);cursor:pointer;position:sticky;top:0;z-index:1}
+  th:nth-child(1),td:nth-child(1),th:nth-child(2),td:nth-child(2){text-align:left}
+  td:nth-child(1){cursor:pointer;color:#1a73e8}
+  td.hit{text-align:left;white-space:normal;min-width:200px;font-size:12px;color:var(--sub)}
+  .s6{color:#d32f2f;font-weight:bold}.s5{color:#f57c00;font-weight:bold}
+  .up{color:#d32f2f}.down{color:#2e7d32}
+  .tip{font-size:12px;color:var(--sub);margin-top:8px;line-height:1.6}
+  #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#333;color:#fff;padding:6px 14px;border-radius:16px;font-size:13px;display:none}
+</style>
+</head>
+<body>
+<h1>A股选股结果</h1>
+<div class="meta" id="meta">加载中...</div>
+<div class="bar">
+  <input id="q" placeholder="搜索代码/名称" oninput="render()">
+  <select id="min" onchange="render()">
+    <option value="0">全部得分</option>
+    <option value="4">得分≥4</option>
+    <option value="5">得分≥5</option>
+    <option value="6">得分=6</option>
+  </select>
+  <a href="stocks.csv" download>下载CSV</a>
+  <a href="#" onclick="copyAll();return false">复制当前代码</a>
+</div>
+<div class="wrap"><table id="t"></table></div>
+<div class="tip">
+  点表头排序；点代码可复制。流通市值为最新值，非信号日历史值；价格为前复权。<br>
+  硬性条件：非ST/科创/北交所、市值50~300亿、5~7个交易日前大阳线(≥5%)、之后不破其低点、现价≤阳线高点×1.03、站上MA60且MA60向上、离60日低点≥15%。<br>
+  仅供参考，不构成投资建议。
+</div>
+<div id="toast"></div>
+<script>
+const cols=[
+ ["code","代码"],["name","名称"],["score","得分"],["signal_date","信号日"],
+ ["days_ago","距今"],["signal_gain","信号涨幅%"],["signal_low","信号低"],
+ ["signal_high","信号高"],["after_low","后续低"],["latest_close","现价"],
+ ["above_high","高于阳线高%"],["safe_space","安全空间%"],["gain20","20日涨幅%"],
+ ["dist_ma20","距MA20%"],["from_low60","距60日低%"],["to_high60","距60日高%"],
+ ["float_cap","流通市值(亿)"],["hit","命中条件"]];
+let data=[],sortKey="score",asc=false,shown=[];
+fetch("data.json?t="+Date.now()).then(r=>r.json()).then(d=>{
+  data=d.stocks||[];
+  document.getElementById("meta").innerHTML=
+   `更新时间：${d.updated_at}　截止日：${d.cutoff_date}<br>市值池 ${d.pool_count} 只，入选 ${d.count} 只，抓取失败 ${d.failed_count} 只`;
+  render();
+}).catch(e=>{document.getElementById("meta").textContent="数据加载失败："+e});
+function toast(t){const e=document.getElementById("toast");e.textContent=t;e.style.display="block";setTimeout(()=>e.style.display="none",1500)}
+function copyText(t){
+  if(navigator.clipboard){navigator.clipboard.writeText(t).then(()=>toast("已复制："+t.split("\n").length+"项"))}
+  else{const a=document.createElement("textarea");a.value=t;document.body.appendChild(a);a.select();document.execCommand("copy");a.remove();toast("已复制")}
+}
+function copyAll(){copyText(shown.map(r=>r.code).join("\n"))}
+function sortBy(k){ if(sortKey===k)asc=!asc; else{sortKey=k;asc=false} render(); }
+function render(){
+  const q=document.getElementById("q").value.trim();
+  const m=+document.getElementById("min").value;
+  let rows=data.filter(r=>r.score>=m&&(!q||r.code.includes(q)||r.name.includes(q)));
+  rows.sort((a,b)=>{let x=a[sortKey],y=b[sortKey];
+    if(x===undefined||x===null)x="";if(y===undefined||y===null)y="";
+    const c=(typeof x==="number"&&typeof y==="number")?x-y:String(x).localeCompare(String(y));
+    return asc?c:-c;});
+  shown=rows;
+  let h="<tr>"+cols.map(c=>`<th onclick="sortBy('${c[0]}')">${c[1]}${sortKey===c[0]?(asc?" ▲":" ▼"):""}</th>`).join("")+"</tr>";
+  for(const r of rows){
+    h+="<tr>"+cols.map(([k])=>{
+      let v=r[k]; if(v===undefined||v===null)v="";
+      if(k==="code")return `<td onclick="copyText('${v}')">${v}</td>`;
+      if(k==="hit")return `<td class="hit">${v}</td>`;
+      if(k==="score")return `<td class="s${v}">${v}</td>`;
+      if(k==="above_high")return `<td class="${v>=0?'up':'down'}">${v}</td>`;
+      return `<td>${v}</td>`}).join("")+"</tr>";
+  }
+  document.getElementById("t").innerHTML=h;
+}
+</script>
+</body>
+</html>
